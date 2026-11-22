@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="color-scheme" content="dark">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UH</title>
+<link rel="preconnect" href="https://cdn.bsky.app">
+<link rel="preconnect" href="https://public.api.bsky.app" crossorigin>
+<style>
+:root{--muted:#b0b8c4;--text:#fff}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{-webkit-font-smoothing:antialiased;background:#000;color:var(--text);font-family:system-ui,-apple-system,sans-serif;line-height:1.6;margin:0 auto;max-width:880px;padding:32px 20px;text-rendering:optimizeLegibility}
+#feed{display:flex;flex-direction:column;gap:24px}
+.badge{align-items:center;color:var(--muted);display:flex;font-size:1.05rem;font-weight:700;gap:10px;letter-spacing:.2px;margin-bottom:16px}
+.badge img{border-radius:50%;flex-shrink:0;height:28px;object-fit:cover;width:28px}
+.badge time{font-variant-numeric:tabular-nums;font-weight:600}
+.card{border:6px solid var(--c);border-radius:14px;color:inherit;display:block;padding:24px 26px;text-decoration:none;transition:transform .15s ease}
+.card:focus-visible,.card:hover{transform:translateY(-2px)}
+.card:focus-visible,.floating-btn:focus-visible{outline:3px solid var(--text);outline-offset:4px}
+.empty,.loading-state{border:2px dashed #333;border-radius:14px;color:var(--muted);font-size:1.1rem;padding:48px 24px;text-align:center}
+.floating-btn{align-items:center;background:#111;border:2px solid var(--muted);border-radius:50%;bottom:24px;box-shadow:0 4px 16px rgba(0,0,0,.6);color:var(--muted);cursor:pointer;display:flex;height:54px;justify-content:center;position:fixed;right:24px;transition:background .2s ease,border-color .2s ease,transform .15s ease;width:54px;z-index:1000}
+.floating-btn:hover{background:#1a1a1a;border-color:var(--text);color:var(--text);transform:scale(1.05)}
+.floating-btn[hidden]{display:none}
+.loading-state{animation:pulse 1.5s infinite ease-in-out}
+.notify-btn{bottom:90px}
+.t-20minutos{--c:#0077ff}
+.t-efe{--c:#ffe600}
+.t-eldiario{--c:#ff3b30}
+.t-elpais{--c:#fff}
+.t-ep{--c:#00e65b}
+.t-publico{--c:#bf5af2}
+.t-rtve{--c:#ff7900}
+.txt{font-size:1.35rem;font-weight:500;letter-spacing:-.1px;line-height:1.55;overflow-wrap:break-word;white-space:pre-line}
+@keyframes pulse{0%,100%{opacity:.6}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.card,.floating-btn,.loading-state{animation:none;transition:none}}
+</style>
+</head>
+<body>
+<main id="feed">
+  <div class="loading-state">Buscando alertas de última hora...</div>
+</main>
+<button aria-label="Activar notificaciones" class="floating-btn notify-btn" hidden id="notifyBtn" title="Activar notificaciones" type="button">
+  <svg aria-hidden="true" fill="none" height="22" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" viewBox="0 0 24 24" width="22"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+</button>
+<button aria-label="Marcar todo como leído" class="floating-btn" id="markReadBtn" title="Marcar todo como leído" type="button">
+  <svg aria-hidden="true" fill="none" height="24" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" viewBox="0 0 24 24" width="24"><polyline points="20 6 9 17 4 12"/></svg>
+</button>
+<script>
+(()=>{
+'use strict';
+const API='https://public.api.bsky.app/xrpc';
+const DAY_MS=86400000;
+const ESC={'"':'"','&':'&','<':'<','>':'>'};
+const FETCH_TIMEOUT_MS=15000;
+const KEEP_SHORT=new Set(['f1','ia','pp','tc','ts','ue']);
+const POLL_MS=180000;
+const RESCAN_MIN_MS=30000;
+const RX_BRK_CI=/#[uú]ltima\s*hora(?![\p{L}\p{N}_])|(?<![\p{L}\p{N}_])[uú]ltimahora(?![\p{L}\p{N}_])|(?:^|\n)(?:[ \t🔴🚨⚡⚠‼▶•\-\[\(]\uFE0F?)*[uú]ltima\s+hora(?:\s*[:|¦│┃｜\-–—·•.\]\)]|\s|$)|[🔴🚨⚡‼]\uFE0F?\s*[uú]ltima\s+hora(?![\p{L}\p{N}_])|(?<![\p{L}\p{N}_])[uú]ltima\s+hora\s*[:|¦│┃｜\-–—·]/iu;
+const RX_BRK_CS=/(?<![\p{L}\p{N}_])[UÚ]LTIMA\s+HORA(?![\p{L}\p{N}_])/u;
+const RX_CLEAN=/\(\s*\)|\[\s*\]|\s*(?:[👇🔗📲➡▶]\uFE0F?)+\s*$/gu;
+const RX_EEUU=/\b(?:ee\.?\s*uu\.?|estados\s+unidos)(?![a-z0-9])/g;
+const RX_END_DOT=/(?<!\.)\.$/;
+const RX_FALSE=/(?<![\p{L}\p{N}_])(?:(?:a|al|ante|como|con|de|del|desde|durante|el|en|esa|ese|esta|este|hasta|la|las|lo|los|mi|para|por|sin|sobre|su|sus|tras|tu|un|una|unas|unos)\s+[uú]ltima\s+hora(?![\p{L}\p{N}_])|[uú]ltima\s+hora[ \t]+(?:a|al|ante|con|contra|de|del|desde|durante|en|entre|hacia|hasta|para|por|sin|sobre|tras)(?![\p{L}\p{N}_]))/giu;
+const RX_HTTP=/^https?:\/\//i;
+const RX_LINES=/\n{3,}/g;
+const RX_NORM=/(?:(?<=[a-z]{2}[ai]d)[oa]s?|(?<=al|[dt]ad|[dst]or|ion)es|(?<=[a-z]{3}[ae])n|(?<=[aeiou])s)$/;
+const RX_PREFIX=/^(?:[\s🔴🚨⚡⚠‼▶•\-\[\(]\uFE0F?)*(?:#[uú]ltima\s*hora|[uú]ltimahora|[uú]ltima\s+hora)(?:[\s\]\)]*[:|¦│┃｜\-–—·•.][\s:|¦│┃｜\-–—·•.\]\)]*|[\s\]\)]+[Il](?:\s+|$)|[\s\]\)]+|$)/iu;
+const RX_SEP=/[-–—/]+/g;
+const RX_SPACES=/[ \t]{2,}/g;
+const RX_URLS=/https?:\/\/[^\s)\]]+|\b(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:[a-z]{2,12}\/[^\s)\]]+|(?:app|at|cat|co|com|es|eu|fm|gal|info|io|it|ly|me|net|news|org|press|social|tv)\b(?:\/[^\s)\]]*)?)/gi;
+const SIMILARITY_THRESHOLD=0.2;
+const SOURCES=[
+  {cls:'t-20minutos',handles:['20minutos.es'],name:'20minutos'},
+  {cls:'t-efe',handles:['efe.com','efenoticias.bsky.social','agenciaefe.bsky.social'],name:'Agencia EFE'},
+  {cls:'t-elpais',handles:['elpais.com'],name:'El País'},
+  {cls:'t-eldiario',handles:['eldiario.es'],name:'elDiario.es'},
+  {cls:'t-ep',handles:['europapress.es','europapress.bsky.social'],name:'Europa Press'},
+  {cls:'t-publico',handles:['publico.es'],name:'Público'},
+  {cls:'t-rtve',handles:['rtvenoticias.rtve.es'],name:'RTVE Noticias'}
+].map(s=>({...s,actor:null}));
+const STOP_WORDS=new Set(['ahora','algo','algunas','algunos','ante','antes','ayer','como','con','contra','cual','cuando','del','desde','domingo','donde','durante','ella','ellas','ellos','entre','esa','esas','ese','eso','esos','esta','estaba','estaban','estas','este','esto','estos','fue','fuera','fueron','habia','hacia','han','has','hasta','hay','hoy','ido','jueves','les','los','lunes','martes','mas','mientras','miercoles','mis','mucho','muy','nos','nosotras','nosotros','otra','otras','otro','otros','para','pero','por','porque','que','quien','sabado','sea','sean','segun','sido','sin','sobre','sois','somos','son','soy','sus','suyo','suyos','tambien','tiene','tienen','tras','una','unas','uno','unos','viernes','vosotras','vosotros']);
+const TIME_FMT=new Intl.DateTimeFormat('es-ES',{hour:'2-digit',minute:'2-digit'});
+const TIME_WINDOW_MS=3600000;
+
+const dec=new TextDecoder();
+const enc=new TextEncoder();
+const feedEl=document.getElementById('feed');
+const markReadBtn=document.getElementById('markReadBtn');
+const notifyBtn=document.getElementById('notifyBtn');
+
+let busy=false;
+let initialized=false;
+let lastKeys='';
+let lastReadTimestamp=0;
+let lastScanAt=0;
+let latestTs=0;
+let recentStories=[];
+const seenUris=new Map();
+try{lastReadTimestamp=Number(localStorage.getItem('lastReadTimestamp'))||0;}catch{}
+
+function calculateSimilarity(setA,setB){
+  if(!setA.size||!setB.size)return 0;
+  let intersection=0;
+  for(const item of setA){
+    if(setB.has(item))intersection++;
+  }
+  return intersection/(setA.size+setB.size-intersection);
+}
+
+function cleanAlertText(text){
+  return text.replace(RX_PREFIX,'').replace(RX_END_DOT,'').trim();
+}
+
+function esc(s){
+  return String(s||'').replace(/["&<>]/g,c=>ESC[c]);
+}
+
+function extractUrl(post,rawText,facets){
+  const ext=post.embed?.external?.uri||post.embed?.media?.external?.uri;
+  if(ext&&RX_HTTP.test(ext))return ext;
+  for(const f of facets||[]){
+    const uri=f.features?.find(ft=>ft.$type==='app.bsky.richtext.facet#link')?.uri;
+    if(uri&&RX_HTTP.test(uri))return uri;
+  }
+  const match=rawText?.match(RX_URLS)?.[0]?.replace(/[.,;:!?]+$/,'');
+  if(match)return RX_HTTP.test(match)?match:`https://${match}`;
+  return `https://bsky.app/profile/${encodeURIComponent(post.author?.handle||'')}/post/${encodeURIComponent(post.uri.split('/').pop()||'')}`;
+}
+
+async function fetchAlerts(src){
+  const feed=await resolveFeed(src);
+  if(!feed)return null;
+  const now=Date.now();
+  const out=[];
+  for(const item of feed){
+    if(item.reason&&item.reason.$type!=='app.bsky.feed.defs#reasonPin')continue;
+    const post=item.post;
+    const avatar=post?.author?.avatar;
+    const facets=post?.record?.facets;
+    const raw=post?.record?.text;
+    const text=stripLinks(raw,facets);
+    if(text&&isBreaking(text)){
+      const cleanText=cleanAlertText(text);
+      const ts=Date.parse(post.record.createdAt)||0;
+      if(cleanText&&ts>lastReadTimestamp&&(now-ts)<DAY_MS){
+        out.push({
+          avatar:avatar&&RX_HTTP.test(avatar)?esc(avatar):'',
+          cls:src.cls,
+          html:esc(cleanText),
+          kw:getKeywords(cleanText),
+          name:src.name,
+          ts:ts,
+          uri:post.uri,
+          url:esc(extractUrl(post,raw,facets))
+        });
+      }
+    }
+  }
+  return out;
+}
+
+async function fetchJson(url){
+  try{
+    const res=await fetch(url,{signal:window.AbortSignal?.timeout?.(FETCH_TIMEOUT_MS)});
+    return res.ok?await res.json():null;
+  }catch{return null;}
+}
+
+async function getFeed(actor){
+  const data=await fetchJson(`${API}/app.bsky.feed.getAuthorFeed?actor=${encodeURIComponent(actor)}&limit=100&filter=posts_no_replies`);
+  return data?.feed?.length?data.feed:null;
+}
+
+function getKeywords(text){
+  const clean=text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(RX_SEP,' ').replace(RX_EEUU,'eeuu').replace(/[^\w\s]/g,'');
+  const keywords=new Set();
+  for(const w of clean.split(/\s+/)){
+    if((w.length>2||KEEP_SHORT.has(w))&&!STOP_WORDS.has(w))keywords.add(w.length>3?w.replace(RX_NORM,''):w);
+  }
+  return keywords;
+}
+
+function isBreaking(text){
+  const s=text.replace(RX_FALSE,' ');
+  return RX_BRK_CI.test(s)||RX_BRK_CS.test(s);
+}
+
+function isDuplicate(alert){
+  for(const existing of recentStories){
+    if(Math.abs(alert.ts-existing.ts)<=TIME_WINDOW_MS&&calculateSimilarity(alert.kw,existing.kw)>=SIMILARITY_THRESHOLD){
+      return true;
+    }
+  }
+  return false;
+}
+
+async function resolveFeed(src){
+  const prev=src.actor;
+  if(prev){
+    const cached=await getFeed(prev);
+    if(cached)return cached;
+    src.actor=null;
+  }
+  for(const h of src.handles){
+    if(h===prev)continue;
+    const feed=await getFeed(h);
+    if(feed)return(src.actor=h,feed);
+  }
+  return null;
+}
+
+async function scan(){
+  if(busy)return;
+  busy=true;
+  try{
+    const results=await Promise.all(SOURCES.map(fetchAlerts));
+    if(results.every(r=>r===null)){
+      if(!feedEl.querySelector('.card')){
+        feedEl.innerHTML='<div class="empty">Error al cargar las alertas. Comprueba tu conexión.</div>';
+        lastKeys='ERROR';
+      }
+      return;
+    }
+    lastScanAt=Date.now();
+    recentStories=recentStories.filter(s=>lastScanAt-s.ts<=DAY_MS);
+    for(const [u,t] of seenUris){
+      if(lastScanAt-t>DAY_MS)seenUris.delete(u);
+    }
+    const alerts=[...new Map(results.flat().filter(p=>p&&p.ts>lastReadTimestamp).map(p=>[p.uri,p])).values()].sort((a,b)=>a.ts-b.ts);
+    if(alerts.length)latestTs=Math.max(latestTs,alerts[alerts.length-1].ts);
+    let hasNew=false;
+    for(const p of alerts){
+      if(seenUris.has(p.uri))continue;
+      seenUris.set(p.uri,p.ts);
+      if(!isDuplicate(p)){
+        recentStories.push({kw:p.kw,ts:p.ts});
+        if(initialized)hasNew=true;
+      }
+    }
+    initialized=true;
+    if(hasNew)sendNotification();
+    alerts.reverse();
+
+    const keys=alerts.length?alerts.map(p=>p.uri).join('|'):'EMPTY';
+    if(keys!==lastKeys){
+      feedEl.innerHTML=alerts.length?alerts.map(p=>`
+        <a class="card ${p.cls}" href="${p.url}" rel="noopener noreferrer" target="_blank">
+          <div class="badge">
+            ${p.avatar?`<img alt="" decoding="async" loading="lazy" src="${p.avatar}">`:''}
+            <span>${p.name} · <time datetime="${new Date(p.ts).toISOString()}">${TIME_FMT.format(p.ts)}</time></span>
+          </div>
+          <div class="txt">${p.html}</div>
+        </a>
+      `).join(''):'<div class="empty">Estás al día</div>';
+      lastKeys=keys;
+    }
+  }finally{
+    busy=false;
+  }
+}
+
+function sendNotification(){
+  if(window.Notification?.permission==='granted'){
+    try{new Notification(' ',{renotify:true,tag:'uh'});}catch{}
+  }
+}
+
+function stripLinks(text,facets){
+  if(!text)return'';
+  if(facets?.length){
+    const ranges=[];
+    for(const f of facets){
+      if(f.index&&f.features?.some(ft=>ft.$type==='app.bsky.richtext.facet#link')){
+        ranges.push([f.index.byteStart,f.index.byteEnd]);
+      }
+    }
+    if(ranges.length){
+      ranges.sort((a,b)=>a[0]-b[0]);
+      const bytes=enc.encode(text);
+      let out='',pos=0;
+      for(const [s,e] of ranges){
+        if(s>=pos&&e<=bytes.length&&s<e){
+          out+=dec.decode(bytes.subarray(pos,s));
+          pos=e;
+        }
+      }
+      text=out+dec.decode(bytes.subarray(pos));
+    }
+  }
+  return text.replace(RX_URLS,'').replace(RX_CLEAN,'').replace(RX_SPACES,' ').replace(RX_LINES,'\n\n').trim();
+}
+
+function updateNotifyBtn(){
+  notifyBtn.hidden=window.Notification?.permission!=='default';
+}
+
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden&&(lastKeys==='ERROR'||Date.now()-lastScanAt>=RESCAN_MIN_MS))scan();
+});
+
+feedEl.addEventListener('error',e=>{
+  if(e.target?.tagName==='IMG')e.target.remove();
+},true);
+
+markReadBtn.addEventListener('click',()=>{
+  lastReadTimestamp=Math.max(Date.now(),latestTs);
+  try{localStorage.setItem('lastReadTimestamp',String(lastReadTimestamp));}catch{}
+  feedEl.innerHTML='<div class="empty">Estás al día</div>';
+  lastKeys='EMPTY';
+});
+
+notifyBtn.addEventListener('click',async()=>{
+  try{await window.Notification?.requestPermission();}catch{}
+  updateNotifyBtn();
+});
+
+window.addEventListener('online',scan);
+
+updateNotifyBtn();
+scan();
+setInterval(scan,POLL_MS);
+})();
+</script>
+</body>
+</html>
