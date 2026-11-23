@@ -43,7 +43,6 @@ const ESC={'"':'"','&':'&','<':'<','>':'>',"'":'&#39;'};
 const FETCH_TIMEOUT_MS=15000;
 const KEEP_SHORT=new Set(['f1','ia','pp','tc','ts','ue']);
 const PAGE_SIZE=3;
-const ROTATE_MS=15000;
 const POLL_MS=180000;
 const RESCAN_MIN_MS=30000;
 const RX_BRK_CI=/#[uú]ltima\s*hora(?![\p{L}\p{N}_])|(?<![\p{L}\p{N}_])[uú]ltimahora(?![\p{L}\p{N}_])|(?:^|\n)(?:[ \t🔴🚨⚡⚠‼•\-\[\(]\uFE0F?)*[uú]ltima\s+hora(?:\s*[:|¦│┃｜\-–—·•.\]\)]|\s|$)|[🔴🚨⚡‼]\uFE0F?\s*[uú]ltima\s+hora(?![\p{L}\p{N}_])|(?<![\p{L}\p{N}_])[uú]ltima\s+hora\s*[:|¦│┃｜\-–—·]/iu;
@@ -252,12 +251,13 @@ function stripLinks(text,facets){
   return text.replace(RX_URLS,'').replace(RX_CLEAN,'').replace(RX_SPACES,' ').replace(RX_LINES,'\n\n').trim();
 }
 
-setInterval(()=>{
-  if(allAlerts.length > PAGE_SIZE){
+// Función global expuesta para que Android/MacroDroid pueda cambiar de página
+window.nextPage = function() {
+  if (allAlerts.length > PAGE_SIZE) {
     currentPage++;
     renderPage();
   }
-},ROTATE_MS);
+};
 
 setInterval(()=>{
   document.querySelectorAll('time[data-ts]').forEach(el=>{
