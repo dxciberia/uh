@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="color-scheme" content="dark">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UH</title>
+<style>
+:root{--muted:#b0b8c4;--text:#fff}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{background:#000;color:var(--text);font-family:system-ui,sans-serif;line-height:1.25;margin:0 auto;max-width:880px;padding:6px;display:flex;flex-direction:column;justify-content:center}
+#feed{display:flex;flex-direction:column;gap:5px;overflow:hidden;width:100%}
+.card{border:2px solid var(--c);border-radius:6px;color:inherit;display:block;padding:6px 8px;animation:fadein .4s ease}
+.empty,.loading-state{border:2px dashed #333;border-radius:6px;color:var(--muted);font-size:0.9rem;padding:16px;text-align:center}
+.loading-state{animation:pulse 1.5s infinite ease-in-out}
+.t-20minutos{--c:#4f46e5}
+.t-efe{--c:#ffe600}
+.t-eldiario{--c:#ff3b30}
+.t-elpais{--c:#fff}
+.t-ep{--c:#10b981}
+.t-publico{--c:#bf5af2}
+.t-rtve{--c:#ff7900}
+.txt{font-size:0.92rem;font-weight:500;overflow-wrap:break-word;white-space:pre-line}
+.txt time{font-variant-numeric:tabular-nums;font-weight:500}
+.sep{margin:0 4px}
+#indicator{color:var(--muted);font-size:0.75rem;text-align:right;margin-top:6px;opacity:0.5;font-variant-numeric:tabular-nums}
+@keyframes pulse{0%,100%{opacity:.6}50%{opacity:1}}
+@keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<main id="feed">
+  <div class="loading-state">Buscando alertas...</div>
+</main>
+<div id="indicator"></div>
+<script>
+(()=>{
+'use strict';
+const API='https://public.api.bsky.app/xrpc';
+const DAY_MS=86400000;
+const ESC={'"':'"','&':'&','<':'<','>':'>',"'":'&#39;'};
+const FETCH_TIMEOUT_MS=15000;
+const KEEP_SHORT=new Set(['f1','ia','pp','tc','ts','ue']);
+const PAGE_SIZE=3;
+const ROTATE_MS=15000;
+const POLL_MS=180000;
+const RESCAN_MIN_MS=30000;
+const RX_BRK_CI=/#[uú]ltima\s*hora(?![\p{L}\p{N}_])|(?<![\p{L}\p{N}_])[uú]ltimahora(?![\p{L}\p{N}_])|(?:^|\n)(?:[ \t🔴🚨⚡⚠‼•\-\[\(]\uFE0F?)*[uú]ltima\s+hora(?:\s*[:|¦│┃｜\-–—·•.\]\)]|\s|$)|[🔴🚨⚡‼]\uFE0F?\s*[uú]ltima\s+hora(?![\p{L}\p{N}_])|(?<![\p{L}\p{N}_])[uú]ltima\s+hora\s*[:|¦│┃｜\-–—·]/iu;
+const RX_BRK_CS=/(?<![\p{L}\p{N}_])[UÚ]LTIMA\s+HORA(?![\p{L}\p{N}_])/u;
+const RX_CLEAN=/\(\s*\)|\[\s*\]|\s*(?:[👇🔗📲➡▶]\uFE0F?)+\s*$/gu;
+const RX_EEUU=/\b(?:ee\.?\s*uu\.?|estados\s+unidos)(?![a-z0-9])/g;
+const RX_END_DOT=/(?<!\.)\.$/;
+const RX_FALSE=/(?<![\p{L}\p{N}_])(?:(?:a|al|ante|como|con|de|del|desde|durante|el|en|esa|ese|esta|este|hasta|la|las|lo|los|mi|para|por|sin|sobre|su|sus|tras|tu|un|una|unas|unos)\s+[uú]ltima\s+hora(?![\p{L}\p{N}_])|[uú]ltima\s+hora[ \t]+(?:a|al|ante|con|contra|de|del|desde|durante|en|entre|hacia|hasta|para|por|sin|sobre|tras)(?![\p{L}\p{N}_]))/giu;
+const RX_LINES=/\n{3,}/g;
+const RX_NORM=/(?:(?<=[a-z]{3})[oa]s?|(?<=al|[dt]ad|[dst]or|ion)es|(?<=[a-z]{3}[ae])n|(?<=[aeiou])s)$/;
+const RX_PREFIX=/^(?:[\s\p{Extended_Pictographic}\uFE0F\-\[\(•▶‼⚠⚡🚨🔴])*(?:#[uú]ltima\s*hora|[uú]ltimahora|[uú]ltima\s+hora)(?:[\s\]\)]*[:|¦│┃｜\-–—·•.][\s:|¦│┃｜\-–—·•.\]\)\p{Extended_Pictographic}\uFE0F]*|[\s\]\)]+[Il](?:\s+|$)|[\s\]\)\p{Extended_Pictographic}\uFE0F]+|$)/iu;
+const RX_SEP=/[-–—/]+/g;
+const RX_SPACES=/[ \t]{2,}/g;
+const RX_URLS=/https?:\/\/[^\s)\]]+|\b(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:[a-z]{2,12}\/[^\s)\]]+|(?:app|at|cat|co|com|es|eu|fm|gal|info|io|it|ly|me|net|news|org|press|social|tv)\b(?:\/[^\s)\]]*)?)/gi;
+const SIMILARITY_THRESHOLD=0.3;
+const SOURCES=[
+  {cls:'t-20minutos',handles:['20minutos.es']},
+  {cls:'t-efe',handles:['efe.com','efenoticias.bsky.social','agenciaefe.bsky.social']},
+  {cls:'t-elpais',handles:['elpais.com']},
+  {cls:'t-eldiario',handles:['eldiario.es']},
+  {cls:'t-ep',handles:['europapress.es','europapress.bsky.social']},
+  {cls:'t-publico',handles:['publico.es']},
+  {cls:'t-rtve',handles:['rtvenoticias.rtve.es']}
+].map(s=>({...s,actor:null}));
+const STOP_WORDS=new Set(['ahora','algo','algunas','algunos','ante','antes','ayer','como','con','contra','cual','cuando','del','desde','domingo','donde','durante','ella','ellas','ellos','entre','esa','esas','ese','eso','esos','esta','estaba','estaban','estas','este','esto','estos','fue','fuera','fueron','habia','hacia','han','has','hasta','hay','hoy','ido','jueves','les','los','lunes','martes','mas','mientras','miercoles','mis','mucho','muy','nos','nosotras','nosotros','otra','otras','otro','otros','para','pero','por','porque','que','quien','sabado','sea','sean','segun','sido','sin','sobre','sois','somos','son','soy','sus','suyo','suyos','tambien','tiene','tienen','tras','una','unas','uno','unos','viernes','vosotras','vosotros']);
+const TIME_WINDOW_MS=10800000;
+
+const dec=new TextDecoder();
+const enc=new TextEncoder();
+const feedEl=document.getElementById('feed');
+const indicatorEl=document.getElementById('indicator');
+
+let busy=false;
+let allAlerts=[];
+let currentPage=0;
+let lastScanAt=0;
+
+function calculateSimilarity(setA,setB){
+  if(!setA.size||!setB.size)return 0;
+  const [small,large]=setA.size<setB.size?[setA,setB]:[setB,setA];
+  let hit=0;
+  for(const w of small)if(large.has(w))hit++;
+  return hit/small.size;
+}
+
+function cleanAlertText(text){
+  return text.replace(RX_PREFIX,'').replace(RX_END_DOT,'').trim();
+}
+
+function esc(s){
+  return String(s||'').replace(/["&<>']/g,c=>ESC[c]);
+}
+
+async function fetchAlerts(src){
+  const feed=await resolveFeed(src);
+  if(!feed)return null;
+  const now=Date.now();
+  const out=[];
+  for(const item of feed){
+    if(item.reason&&item.reason.$type!=='app.bsky.feed.defs#reasonPin')continue;
+    const post=item.post;
+    const facets=post?.record?.facets;
+    const raw=post?.record?.text;
+    const text=stripLinks(raw,facets);
+    if(text&&isBreaking(text)){
+      const cleanText=cleanAlertText(text);
+      const ts=Date.parse(post.record.createdAt)||0;
+      if(cleanText&&(now-ts)<DAY_MS){
+        out.push({
+          cls:src.cls,
+          html:esc(cleanText),
+          kw:getKeywords(cleanText),
+          ts,
+          uri:post.uri
+        });
+      }
+    }
+  }
+  return out;
+}
+
+async function fetchJson(url){
+  try{
+    const res=await fetch(url,{signal:AbortSignal.timeout?.(FETCH_TIMEOUT_MS)});
+    return res.ok?await res.json():null;
+  }catch{return null;}
+}
+
+function formatRelative(ts){
+  const diffSec=Math.max(0,Math.floor((Date.now()-ts)/1000));
+  if(diffSec<5)return 'ahora';
+  if(diffSec<60)return `${diffSec}s`;
+  const diffMin=Math.floor(diffSec/60);
+  if(diffMin<60)return `${diffMin}m`;
+  const diffHr=Math.floor(diffMin/60);
+  return `${diffHr}h`;
+}
+
+async function getFeed(actor){
+  const data=await fetchJson(`${API}/app.bsky.feed.getAuthorFeed?actor=${encodeURIComponent(actor)}&limit=50&filter=posts_no_replies`);
+  return data?.feed?.length?data.feed:null;
+}
+
+function getKeywords(text){
+  const clean=text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(RX_SEP,' ').replace(RX_EEUU,'eeuu').replace(/[^a-z0-9\s]/g,'');
+  const keywords=new Set();
+  for(const w of clean.split(/\s+/)){
+    if((w.length>2||KEEP_SHORT.has(w))&&!STOP_WORDS.has(w))keywords.add(w.length>3?w.replace(RX_NORM,''):w);
+  }
+  return keywords;
+}
+
+function isBreaking(text){
+  const s=text.replace(RX_FALSE,' ');
+  return RX_BRK_CI.test(s)||RX_BRK_CS.test(s);
+}
+
+function isDuplicate(a,accepted){
+  return accepted.some(b=>Math.abs(a.ts-b.ts)<=TIME_WINDOW_MS&&calculateSimilarity(a.kw,b.kw)>=SIMILARITY_THRESHOLD);
+}
+
+async function resolveFeed(src){
+  const prev=src.actor;
+  if(prev){
+    const cached=await getFeed(prev);
+    if(cached)return cached;
+    src.actor=null;
+  }
+  for(const h of src.handles){
+    if(h===prev)continue;
+    const feed=await getFeed(h);
+    if(feed)return(src.actor=h,feed);
+  }
+  return null;
+}
+
+function renderPage(){
+  if(!allAlerts.length){
+    feedEl.innerHTML='<div class="empty">Sin alertas recientes</div>';
+    if(indicatorEl) indicatorEl.textContent='';
+    return;
+  }
+  const totalPages=Math.ceil(allAlerts.length/PAGE_SIZE);
+  currentPage=currentPage%totalPages;
+  const start=currentPage*PAGE_SIZE;
+  const pageItems=allAlerts.slice(start, start+PAGE_SIZE);
+
+  feedEl.innerHTML=pageItems.map(p=>`
+    <article class="card ${p.cls}">
+      <div class="txt"><time datetime="${new Date(p.ts).toISOString()}" data-ts="${p.ts}">${esc(formatRelative(p.ts))}</time><span class="sep">|</span>${p.html}</div>
+    </article>
+  `).join('');
+
+  if(indicatorEl){
+    indicatorEl.textContent=`${currentPage + 1}/${totalPages}`;
+  }
+}
+
+async function scan(){
+  if(busy)return;
+  busy=true;
+  try{
+    const results=await Promise.all(SOURCES.map(fetchAlerts));
+    if(results.every(r=>r===null)){
+      if(!feedEl.querySelector('.card')){
+        feedEl.innerHTML='<div class="empty">Error de conexión.</div>';
+        if(indicatorEl) indicatorEl.textContent='';
+      }
+      return;
+    }
+    lastScanAt=Date.now();
+    const sorted=[...new Map(results.flat().filter(Boolean).map(p=>[p.uri,p])).values()].sort((a,b)=>a.ts-b.ts);
+    const alerts=[];
+    for(const p of sorted)if(!isDuplicate(p,alerts))alerts.push(p);
+    alerts.reverse();
+
+    allAlerts=alerts;
+    renderPage();
+  }finally{
+    busy=false;
+  }
+}
+
+function stripLinks(text,facets){
+  if(!text)return'';
+  if(facets?.length){
+    const ranges=[];
+    for(const f of facets){
+      if(f.index&&f.features?.some(ft=>ft.$type==='app.bsky.richtext.facet#link')){
+        ranges.push([f.index.byteStart,f.index.byteEnd]);
+      }
+    }
+    if(ranges.length){
+      ranges.sort((a,b)=>a[0]-b[0]);
+      const bytes=enc.encode(text);
+      let out='',pos=0;
+      for(const [s,e] of ranges){
+        if(s>=pos&&e<=bytes.length&&s<e){
+          out+=dec.decode(bytes.subarray(pos,s));
+          pos=e;
+        }
+      }
+      text=out+dec.decode(bytes.subarray(pos));
+    }
+  }
+  return text.replace(RX_URLS,'').replace(RX_CLEAN,'').replace(RX_SPACES,' ').replace(RX_LINES,'\n\n').trim();
+}
+
+setInterval(()=>{
+  if(allAlerts.length > PAGE_SIZE){
+    currentPage++;
+    renderPage();
+  }
+},ROTATE_MS);
+
+setInterval(()=>{
+  document.querySelectorAll('time[data-ts]').forEach(el=>{
+    el.textContent=formatRelative(Number(el.dataset.ts));
+  });
+},30000);
+
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden&&(allAlerts.length===0||Date.now()-lastScanAt>=RESCAN_MIN_MS))scan();
+});
+
+window.addEventListener('online',scan);
+
+scan();
+setInterval(scan,POLL_MS);
+})();
+</script>
+</body>
+</html>
