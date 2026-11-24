@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UH</title>
+<style>
+:root{--m:#b0b8c4;--t:#fff}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{background:#000;color:var(--t);font-family:system-ui,sans-serif;line-height:1.25;max-width:880px;margin:0 auto;padding:6px 6px 110px;display:flex;flex-direction:column;justify-content:flex-end}
+#feed{display:flex;flex-direction:column;gap:5px;overflow:hidden;width:100%;max-height:100%}
+.card{border:2px solid var(--c);border-radius:6px;padding:6px 8px;animation:f .4s ease}
+.empty,.load{border:2px dashed #333;border-radius:6px;color:var(--m);font-size:.9rem;padding:16px;text-align:center}
+.load{animation:p 1.5s infinite ease-in-out}
+.t-20minutos{--c:#4f46e5}
+.t-efe{--c:#ffe600}
+.t-eldiario{--c:#ff3b30}
+.t-elpais{--c:#fff}
+.t-ep{--c:#10b981}
+.t-publico{--c:#bf5af2}
+.t-rtve{--c:#ff7900}
+.txt{font-size:.92rem;font-weight:500;overflow-wrap:break-word;white-space:pre-line}
+.txt time{font-variant-numeric:tabular-nums}
+.sep{margin:0 4px}
+#ind{color:var(--m);font-size:.75rem;text-align:right;margin-top:6px;opacity:.5;font-variant-numeric:tabular-nums}
+@keyframes p{0%,100%{opacity:.6}50%{opacity:1}}
+@keyframes f{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<main id="feed"><div class="load">Buscando alertas...</div></main>
+<div id="ind"></div>
+<script>
+(()=>{
+'use strict';
+const API='https://public.api.bsky.app/xrpc';
+const ESC={'"':'"','&':'&','<':'<','>':'>',"'":'&#39;'};
+const KEEP=new Set(['f1','ia','pp','tc','ts','ue']);
+const SRC=[
+  {c:'t-20minutos',h:['20minutos.es']},
+  {c:'t-efe',h:['efe.com','efenoticias.bsky.social','agenciaefe.bsky.social']},
+  {c:'t-elpais',h:['elpais.com']},
+  {c:'t-eldiario',h:['eldiario.es']},
+  {c:'t-ep',h:['europapress.es','europapress.bsky.social']},
+  {c:'t-publico',h:['publico.es']},
+  {c:'t-rtve',h:['rtvenoticias.rtve.es']}
+].map(s=>({...s,a:null}));
+const STOP=new Set(['ahora','algo','algunas','algunos','ante','antes','ayer','como','con','contra','cual','cuando','del','desde','domingo','donde','durante','ella','ellas','ellos','entre','esa','esas','ese','eso','esos','esta','estaba','estaban','estas','este','esto','estos','fue','fuera','fueron','habia','hacia','han','has','hasta','hay','hoy','ido','jueves','les','los','lunes','martes','mas','mientras','miercoles','mis','mucho','muy','nos','nosotras','nosotros','otra','otras','otro','otros','para','pero','por','porque','que','quien','sabado','sea','sean','segun','sido','sin','sobre','sois','somos','son','soy','sus','suyo','suyos','tambien','tiene','tienen','tras','una','unas','uno','unos','viernes','vosotras','vosotros']);
+const RX_BRK=/(?:#[uú]ltima\s*hora|[uú]ltimahora|[uú]ltima\s+hora)/iu;
+const RX_CLEAN=/\(\s*\)|\[\s*\]|\s*(?:[👇🔗📲➡▶]\uFE0F?)+\s*$/gu;
+const RX_END=/(?<!\.)\.$/;
+const RX_PREFIX=/^(?:[\s\p{Extended_Pictographic}\uFE0F\-\[\(•▶‼⚠⚡🚨🔴])*(?:#[uú]ltima\s*hora|[uú]ltimahora|[uú]ltima\s+hora)(?:[\s\]\)]*[:|¦│┃｜\-–—·•.][\s:|¦│┃｜\-–—·•.\]\)\p{Extended_Pictographic}\uFE0F]*|[\s\]\)]+[Il](?:\s+|$)|[\s\]\)\p{Extended_Pictographic}\uFE0F]+|$)/iu;
+const RX_URLS=/https?:\/\/[^\s)\]]+|\b(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:[a-z]{2,12}\/[^\s)\]]+|(?:app|at|cat|co|com|es|eu|fm|gal|info|io|it|ly|me|net|news|org|press|social|tv)\b(?:\/[^\s)\]]*)?)/gi;
+
+const dec=new TextDecoder(), enc=new TextEncoder();
+const feed=document.getElementById('feed'), ind=document.getElementById('ind');
+let all=[], idx=0, busy=false;
+
+const esc=s=>String(s||'').replace(/["&<>']/g,ch=>ESC[ch]);
+const sim=(a,b)=>{
+  if(!a.size||!b.size)return 0;
+  let [s,l]=a.size<b.size?[a,b]:[b,a], hit=0;
+  for(let w of s)if(l.has(w))hit++;
+  return hit/s.size;
+};
+const kw=t=>{
+  let clean=t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[-–—/]+/g,' ').replace(/\b(?:ee\.?\s*uu\.?|estados\s+unidos)\b/g,'eeuu').replace(/[^a-z0-9\s]/g,''), set=new Set();
+  for(let w of clean.split(/\s+/))if((w.length>2||KEEP.has(w))&&!STOP.has(w))set.add(w.length>3?w.replace(/(?:(?<=[a-z]{3})[oa]s?|(?<=al|[dt]ad|[dst]or|ion)es|(?<=[a-z]{3}[ae])n|(?<=[aeiou])s)$/,''):w);
+  return set;
+};
+const rel=ts=>{
+  let s=Math.max(0,Math.floor((Date.now()-ts)/1000));
+  if(s<5)return'ahora';
+  if(s<60)return s+'s';
+  let m=Math.floor(s/60);
+  return m<60?m+'m':Math.floor(m/60)+'h';
+};
+
+async function get(url){
+  try{let r=await fetch(url,{signal:AbortSignal.timeout?.(15000)});return r.ok?r.json():null;}catch{return null;}
+}
+async function getFeed(actor){
+  let d=await get(`${API}/app.bsky.feed.getAuthorFeed?actor=${encodeURIComponent(actor)}&limit=50&filter=posts_no_replies`);
+  return d?.feed?.length?d.feed:null;
+}
+async function resolve(s){
+  if(s.a){let c=await getFeed(s.a);if(c)return c;s.a=null;}
+  for(let h of s.h){let f=await getFeed(h);if(f)return(s.a=h,f);}
+  return null;
+}
+
+function render(){
+  if(!all.length){
+    feed.innerHTML='<div class="empty">Sin alertas recientes</div>';
+    if(ind)ind.textContent='';
+    return;
+  }
+  let html='', len=all.length;
+  for(let i=0;i<3;i++){
+    let p=all[(idx+i)%len];
+    html+=`<article class="card ${p.c}"><div class="txt"><time datetime="${new Date(p.ts).toISOString()}" data-ts="${p.ts}">${esc(rel(p.ts))}</time><span class="sep">|</span>${p.html}</div></article>`;
+  }
+  feed.innerHTML=html;
+  if(ind)ind.textContent=`${(idx%len)+1} / ${len}`;
+}
+
+async function scan(){
+  if(busy)return;
+  busy=true;
+  try{
+    let res=await Promise.all(SRC.map(async src=>{
+      let f=await resolve(src);
+      if(!f)return null;
+      let now=Date.now(), out=[];
+      for(let item of f){
+        if(item.reason&&item.reason.$type!=='app.bsky.feed.defs#reasonPin')continue;
+        let post=item.post, raw=post?.record?.text;
+        if(!raw||!RX_BRK.test(raw))continue;
+        
+        let text=raw;
+        if(post.record?.facets?.length){
+          let ranges=post.record.facets.map(ft=>ft.index&&ft.features?.some(x=>x.$type==='app.bsky.richtext.facet#link')?[ft.index.byteStart,ft.index.byteEnd]:null).filter(Boolean).sort((a,b)=>a[0]-b[0]);
+          if(ranges.length){
+            let bytes=enc.encode(text), o='', pos=0;
+            for(let [s,e] of ranges){if(s>=pos&&e<=bytes.length&&s<e){o+=dec.decode(bytes.subarray(pos,s));pos=e;}}
+            text=o+dec.decode(bytes.subarray(pos));
+          }
+        }
+        text=text.replace(RX_URLS,'').replace(RX_CLEAN,'').replace(/[ \t]{2,}/g,' ').replace(/\n{3,}/g,'\n\n').trim();
+        let cleanText=text.replace(RX_PREFIX,'').replace(RX_END,'').trim();
+        let ts=Date.parse(post.record.createdAt)||0;
+        if(cleanText&&(now-ts)<86400000){
+          out.push({c:src.c,html:esc(cleanText),kw:kw(cleanText),ts,uri:post.uri});
+        }
+      }
+      return out;
+    }));
+    
+    if(res.every(r=>r===null)){
+      if(!feed.querySelector('.card'))feed.innerHTML='<div class="empty">Error de conexión.</div>';
+      return;
+    }
+    
+    let sorted=[...new Map(res.flat().filter(Boolean).map(p=>[p.uri,p])).values()].sort((a,b)=>a.ts-b.ts), alerts=[];
+    for(let p of sorted){
+      if(!alerts.some(b=>Math.abs(p.ts-b.ts)<=10800000&&sim(p.kw,b.kw)>=0.3))alerts.push(p);
+    }
+    alerts.reverse();
+    all=alerts;
+    render();
+  }finally{busy=false;}
+}
+
+setInterval(()=>{if(all.length){idx=(idx+1)%all.length;render();}},5000);
+setInterval(()=>{document.querySelectorAll('time[data-ts]').forEach(el=>el.textContent=rel(Number(el.dataset.ts)));},30000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)scan();});
+window.addEventListener('online',scan);
+scan();
+setInterval(scan,180000);
+})();
+</script>
+</body>
+</html>
